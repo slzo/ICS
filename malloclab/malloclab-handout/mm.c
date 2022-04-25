@@ -66,19 +66,19 @@ team_t team = {
 #define SUCC_PTR(ptr) ((char *)(ptr) + DSIZE) //get the successor ptr( the ptr in the free_heap_list
 #define PRED(ptr) (*(char **)(ptr)) //get pred address of free block ( the address in the malloc_address
 #define SUCC(ptr) (*(char **)(SUCC_PTR(ptr))) //get suc address of free block ( the address in the malloc_address
-#define SET_PTR(p, ptr) (*(unsigned long *)(p) = (unsigned long)(ptr))
+#define SET_PTR(p, ptr) (*(unsigned long *)(p) = (unsigned long)(ptr)) //put the ptr in the given_place p
 
 /* 
  * mm_init - initialize the malloc package.
  */
-#define MAX_LEVEL 16
-#define MIN_BLOCK 32
-void *free_heap_lists[MAX_LEVEL]; //采用多级链表的分离适配,最小块为32B (header+footer=8B + 16B ptr + 8B free_space
+#define MAX_LEVEL 15
+#define MIN_BLOCK 24
+void *free_heap_lists[MAX_LEVEL]; //采用多级链表的分离适配,最小块为32B (header+footer=8B + 16B ptr
 int Get_Level(size_t size) {
     int level=0;
-    size /= 32;
+    size /= MIN_BLOCK;
     while(size > 1 && level < MAX_LEVEL-1){
-        size >>= 1;
+        size /= 2;
         level++;
     }
     return level;
@@ -100,6 +100,7 @@ void Insert_free_node(void* ptr, size_t size){
 
 void Delete_free_node(void* ptr, size_t size){
     //-----delete the node
+    int level = Get_Level(size);
     if( PRED(ptr) ) {
         if( SUCC(ptr) ) {  //->ptr->
             SET_PTR( SUCC_PTR(PRED(ptr)), SUCC(ptr) );
@@ -109,7 +110,7 @@ void Delete_free_node(void* ptr, size_t size){
             SET_PTR( SUCC_PTR(PRED(ptr)), NULL );
     }
     else {
-        int level = Get_Level(size);
+
         if( SUCC(ptr) ) { // ptr->
             SET_PTR( PRED_PTR(SUCC(ptr)), NULL );
             free_heap_lists[level] = SUCC(ptr);
@@ -152,7 +153,7 @@ static void *coalesce(void *bp) {
         }
     }
     Insert_free_node(bp, size);
-    //bp = coalesce(bp); // coalesce recursively
+    bp = coalesce(bp); // coalesce recursively
     return bp;
 }
 
@@ -190,12 +191,20 @@ int mm_init(void) {
 void *place(void* ptr, size_t size) { //put the left space to the fit list
     size_t surplus = GET_SIZE(HDRP(ptr))-size;
     Delete_free_node(ptr, GET_SIZE(HDRP(ptr)) );
-    if(surplus < MIN_BLOCK) {
+    if(surplus < MIN_BLOCK) { //surplus can't be used later
         PUT( HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)),1) );
         PUT( FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)),1) );
         return ptr;
     }
-    else {
+    else if(surplus >= 10*size) { //surplus >> size
+        PUT(HDRP(ptr), PACK(surplus, 0));
+        PUT(FTRP(ptr), PACK(surplus, 0));
+        *(unsigned int *)(HDRP(NEXT_BLKP(ptr))) = PACK(size,1);
+        *(unsigned int *)(FTRP(NEXT_BLKP(ptr))) = PACK(size,1);
+        Insert_free_node(ptr, surplus);
+        return NEXT_BLKP(ptr);
+    }
+    else { //surplus can be used later
         PUT(HDRP(ptr), PACK(size, 1));
         PUT(FTRP(ptr), PACK(size, 1));
         PUT(HDRP(NEXT_BLKP(ptr)), PACK(surplus, 0));
@@ -211,16 +220,23 @@ void *mm_malloc(size_t size) {
     size = MAX(MIN_BLOCK,ALIGN(size+2*WSIZE)); // alloc_size+footer&header -> align to 8
     void *ptr;
     for(int level = Get_Level(size); level < MAX_LEVEL; level++) { //search from best_fit list, if not found, search in higger level
-        ptr = free_heap_lists[level];
-        while(ptr) {
-            if( GET_SIZE(HDRP(ptr)) < size )
-                ptr = SUCC(ptr);
-            else break;
+        size_t surplus = 1<<30;
+        void *curptr = free_heap_lists[level];
+        while(curptr) { //check current list by best_fit
+            if( GET_SIZE(HDRP(curptr)) < size )
+                curptr = SUCC(curptr);
+            else{
+                if( (GET_SIZE(HDRP(curptr)) - size) < surplus ) {
+                    ptr = curptr;
+                    surplus = GET_SIZE(HDRP(curptr))-size;
+                }
+                curptr = SUCC(curptr);
+            }
         }
-        if(ptr)
+        if(ptr) //get fit free_block in current list
             return place(ptr, size);
     }
-    if(ptr == NULL)
+    if(ptr == NULL) //there is no fit free block
         if( (ptr = extentd_heap(MAX(size, CHUNKSIZE))) == NULL)
             return NULL;
     return place(ptr,size);
@@ -231,7 +247,7 @@ void *mm_malloc(size_t size) {
  */
 void mm_free(void *ptr) {
     size_t size = GET_SIZE(HDRP(ptr));
-    PUT( HDRP(ptr), PACK(size, 0) );
+    PUT( HDRP(ptr), PACK(size, 0) ); //free header and footer
     PUT( FTRP(ptr), PACK(size, 0) );
     Insert_free_node( ptr, size); // coalesce and insert to the list
     coalesce(ptr);
@@ -261,14 +277,14 @@ void *mm_realloc(void *ptr, size_t size) {
                     newptr = NULL;
             }
             next_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-            if(next_size+present_size >= size) {
+            if(next_size+present_size >= size) { //next+present can satisfy
                 Delete_free_node(NEXT_BLKP(ptr), next_size);
                 PUT( HDRP(ptr), PACK(present_size+next_size, 1) );
                 PUT( FTRP(ptr), PACK(present_size+next_size, 1) );
-                newptr = place(ptr, size);
+                newptr = ptr;
             }
         }
-        else {
+        else { //can't satisfy by extend present ptr, need to ask new place and copy
             newptr = mm_malloc(size);
             if (newptr == NULL)
                 return NULL;

@@ -218,7 +218,7 @@ void *mm_malloc(size_t size) {
     if(!size)
         return NULL;
     size = MAX(MIN_BLOCK,ALIGN(size+2*WSIZE)); // alloc_size+footer&header -> align to 8
-    void *ptr;
+    void *ptr=NULL;
     for(int level = Get_Level(size); level < MAX_LEVEL; level++) { //search from best_fit list, if not found, search in higger level
         size_t surplus = 1<<30;
         void *curptr = free_heap_lists[level];
